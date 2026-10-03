@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# 工具自己写的运行日志（跑一次就出一份，不进仓库）
+*日志-*.txt
+_记录/
+_解压输出/
+
+# 使用者自己的配置（样例 smart-unpack.ini.example 要进仓库，真配置不进）
+smart-unpack.ini
+
+# 打包产物
+build/
+dist/
+*.spec
