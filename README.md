@@ -28,7 +28,7 @@ passwords.py     密码来源                        ← 想加新来源只改�
 config.py        可调配置（默认值 + 读配置文件）
 gui.py           界面（唯一 import tkinter 的地方）
 smart_unpack.py  命令行入口 + main
-查未定义.py       静态查「引用了但没定义」的名字（拆分后必跑）
+查未定义.py       静态检查（拆分/改动后必跑）：①「引用了但没定义」的名字 ②「函数里赋值了同名模块级变量却没声明 global」
 selftest.py      阳/阴对照自测
 bin/7z.exe + 7z.dll   解 ZipCrypto / 7z / RAR 用（见下；两个文件缺一不可）
 smart-unpack.ini.example  配置文件样例

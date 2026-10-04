@@ -275,6 +275,24 @@ def 是7z或rar(路径):
     return None
 
 
+文档标志 = ("[Content_Types].xml", "mimetype")
+
+
+def 是文档包(路径):
+    """这个是**文档**、不是待拆的压缩包？判据**只看内容**（后缀本来就不可信）：
+    OOXML（docx / xlsx / pptx…）里一定有 `[Content_Types].xml`；ODF / epub 里一定有 `mimetype`。
+    ⚠️ 为什么要有这条：`.docx`／`.xlsx` **本身就是 zip**，不挡住的话「自动续解」会把它们
+       **拆成一堆 XML 碎片、文档本体没了**。
+    ⚠️ 判据用**内容**、不用扩展名 —— 本工具的前提就是「后缀不可信」，
+       按后缀豁免等于自相矛盾；而「被改名成 .docx 的分享包」不带这两个标志，**照样会被拆**。"""
+    try:
+        with zipfile.ZipFile(路径, "r") as z:
+            名们 = set(z.namelist())
+    except Exception:
+        return False
+    return any(标 in 名们 for 标 in 文档标志)
+
+
 def 读7z列表(文):
     """把 `7z l -slt` 的文本拆成 [{键: 值}, …]。**第 0 块是压缩包自己**，其后才是条目。"""
     块们 = []
@@ -355,9 +373,20 @@ def 试7z密码(路径, 密码, 探针条目=None):
     七 = 找7z()
     if not 七:
         return False
-    参 = [七, "x", "-so", "-sccUTF-8", "-p" + (密码 or ""), 路径]
-    if 探针条目:
-        参.append(探针条目)          # 不给条目名 = 整包流出来，白解一遍
+    if not 探针条目:
+        # ⚠️ **挑不出探针**（条目全是 0 字节／只有空文件夹）时，**不能**退回「`x -so` 整包」：
+        #    那会把整包流出来却**一个字都不吐**（0 字节条目没内容）⇒ 读不到字节 ⇒ 正确密码也被判
+        #    「都不对」⇒ 这个包被白白跳过。
+        #    改用 `t`（整包**测试**）：这条路**看退出码是安全的** —— 不给条目名就没有
+        #    「匹配不上也返回 0」那个坑（实测：密码错 rc=2、对 rc=0）。
+        参 = [七, "t", "-sccUTF-8", "-bso0", "-bsp0", "-p" + (密码 or ""), 路径]
+        try:
+            r = subprocess.run(参, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               stdin=subprocess.DEVNULL, timeout=1800)
+        except Exception:
+            return False
+        return r.returncode == 0
+    参 = [七, "x", "-so", "-sccUTF-8", "-p" + (密码 or ""), 路径, 探针条目]
     try:
         p = subprocess.Popen(参, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                              stdin=subprocess.DEVNULL)
@@ -824,6 +853,7 @@ def 再解一层(目录, 剩余, 密码们, 状态, 行们, 标签):
             待办.append(os.path.join(当前, 名))
     解了 = 0
     别的压缩包 = []
+    文档包们 = []
     for p in 待办:
         if not os.path.isfile(p):
             continue
@@ -835,6 +865,10 @@ def 再解一层(目录, 剩余, 密码们, 状态, 行们, 标签):
             if any(k in 什么 for k in 带压缩包味的):
                 别的压缩包.append("%s  =  %s" % (os.path.relpath(p, 目录), 什么))
             continue
+        if 是文档包(p):
+            # 文档（docx/xlsx/odt/epub…）**不往里解** —— 它本身就是 zip，拆开只会得到一堆 XML 碎片
+            文档包们.append("%s  =  %s" % (os.path.relpath(p, 目录), 认头部(p)))
+            continue
         名 = os.path.basename(p)
         # 只嵌一层：内层的内容**摊进同一个包目录**（不再套子目录）
         述, 字节 = 解一个包(p, 目录, 密码们, 状态)
@@ -845,6 +879,14 @@ def 再解一层(目录, 剩余, 密码们, 状态, 行们, 标签):
         再解一层(目录, 剩余 - 1, 密码们, 状态, 行们, 标签 + " / " + 名)
     # 本层结论写清楚：看了几个、解了几个、剩下那些为什么没解
     报("        · 本层看过 %d 个文件，其中 %d 个真身是压缩包（zip/7z/RAR，已解）" % (len(待办), 解了))
+    if 文档包们:
+        # 出声，别默默跳过 —— 使用者得知道「这个没拆是**故意的**」
+        报("        · 另有 %d 个是**文档**（里面带 [Content_Types].xml / mimetype），**故意不拆**"
+           "（拆了只会得到一堆 XML 碎片）：" % len(文档包们))
+        for s in 文档包们[:10]:
+            报("            %s" % s)
+        if len(文档包们) > 10:
+            报("            …还有 %d 个" % (len(文档包们) - 10))
     if 别的压缩包:
         报("        · ⚠️ 另有 %d 个**是压缩包但不是 zip**，本工具认不出、开不了 —— 认得的都列在这："
            % len(别的压缩包))
