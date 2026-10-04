@@ -7,6 +7,29 @@
 
 ---
 
+## 前置条件（**先读这一节**）
+
+> ⚠️ **GitHub 把本仓库标成 "Python" —— 那是按文件后缀统计的，它并不是纯 Python 项目。**
+> **解 `7z` / `RAR` 全靠随包的一个外部二进制 `bin/7z.exe`** —— 纯 Python 生态里**没有**能解 RAR 的库。
+> **这是硬依赖，不是可选项。**
+
+| 要什么 | 必需吗 | 说明 |
+|---|---|---|
+| **Python 3.6+** | 必需 | 代码里最新用到的语法是 f-string。⚠️ **实测只在 3.11 上跑过**，更低的版本没人验过 |
+| **`bin/7z.exe` ＋ `bin/7z.dll`** | **必需**（解 7z / RAR 全靠它） | **随仓库带，不用另外装 7-Zip**。**两个缺一不可**（exe 会按注册表或同目录去找 dll）。许可见 `bin/7z-LICENSE.txt` |
+| **`pyzipper`** | 可选 | 解 **WinZip AES** 加密的 zip 要用。**不装也能跑** —— 标准库 `zipfile` 能解普通 zip 与 ZipCrypto，只有 AES 那些包解不了（那时日志会**明说**，不静默失败） |
+| **`tkinter`** | 可选 | 「弹窗选文件夹」那个框要用。随 CPython 发行版走；**个别 Linux 发行版要单独装 `python3-tk`**，否则弹不出框 |
+
+```bash
+pip install -r requirements.txt     # 唯一的第三方依赖就是 pyzipper
+python smart_unpack.py              # 跑（不填参数就弹窗选文件夹）
+```
+
+**想打成单个可执行文件**（不带 Python 环境发出去）：`bin/` 那两个文件**必须一起带上**，
+否则在没装 7-Zip 的机器上 7z / RAR 直接失效（README 下文「两个引擎」一节有详述）。
+
+---
+
 ## 它解决什么
 
 | 常见做法 | 这个工具 |
@@ -91,7 +114,7 @@ python smart_unpack.py --诊断                            # 环境自检（编�
 _解压输出\
   ├─ 要解压两次.mp3\        ← 子夹名 = 来源（分散档）
   │    └─ 图01.jpg           ← 直接就是内容，压缩包内部的目录结构一律摊平
-  ├─ 忘归人.mp3\
+  ├─ 示例包.mp3\
   └─ _记录\                  ← 工具自己写的东西全收在这儿
        ├─ 运行日志-2026-10-03_1911.txt
        ├─ 解压报告.txt
@@ -110,18 +133,30 @@ _解压输出\
 **⚠️ 头几个字节分不出来** —— 实测 docx / jar / apk / whl / sb3 / 普通 zip 的**头 4 字节全是 `50 4b 03 04`**，
 一模一样。所以「只解真压缩包」**不可能只看魔数**，得再看包里装的是什么。
 
-于是默认按**两条判据**（**任一命中就不拆**）：
+于是默认按**内容判据**（**命中就不拆**）——**要求「两条证据」**，光有一个同名文件**不算**：
 
-| | 判据 | 说明 |
-|---|---|---|
-| ① | **内容特征**（主） | 包里带该格式的标志文件：`[Content_Types].xml`（OOXML）／`mimetype`（ODF·epub）／`META-INF/MANIFEST.MF`（jar）／`AndroidManifest.xml`（apk）／`project.json`（sb3）／`extension.vsixmanifest`（vsix）／`*.dist-info/METADATA`（whl）／`*.nuspec`（nupkg）…… |
-| ② | **后缀名单**（兜底） | 配置项 `不拆后缀`，可在 `smart-unpack.ini` 里手改。**新格式出来自己加一条即可**，不用等改代码 |
+| 格式 | 要什么 |
+|---|---|
+| docx / xlsx / pptx | `[Content_Types].xml` **＋** 有 `word/`·`xl/`·`ppt/` |
+| jar | `META-INF/MANIFEST.MF` **＋** 有 `.class` 或 `META-INF/maven/`·`services/`·`versions/` |
+| apk | `AndroidManifest.xml` **＋** 有 `classes.dex` 或 `resources.arsc` |
+| vsix | `extension.vsixmanifest` **＋** 有 `[Content_Types].xml` |
+| egg | `EGG-INFO/PKG-INFO`（这个本身就够专有） |
+| whl | `*.dist-info/METADATA` · `*.dist-info/WHEEL` |
+| nupkg | `*.nuspec` |
+| **epub / odt / kra** | 有 `mimetype` 文件 **＋ 读它的内容**是不是已知 MIME |
+| **sb3** | 有 `project.json` **＋ 读它的内容**里有没有 Scratch 的 `"targets"` |
+
+**为什么要「两条证据」**：`project.json`／`META-INF/MANIFEST.MF` 这类**通用名**，
+在很多**普通分享包**里都会出现 —— 一个同名文件就定性，会把**正常分享包**也挡掉。
 
 **拿不准就不拆**（默认）。被跳过的一定会在日志里**写明是哪条判据中的**，不会默默略过。
 
-- **要硬拆**：加 `--全部拆`（无视上面两条，见到 zip 就拆）。
-- ⚠️ 判据②**看后缀**，跟本工具「后缀不可信」的招牌**是故意矛盾的** —— 这是拿可靠性换安定性：
-  代价＝**被改名成 `.docx` 的分享包会被放过**。判据①不看后缀，所以**改名成 `.mp3` 的 `.jar` 照样挡得住**。
+**「后缀名单」`不拆后缀` 默认是空的**，配置里可手改。默认空是有意的：
+名单**按后缀判**，会把「**名字起得像交付物、内容其实是普通分享包**」的整条误杀
+（实测一次运行里 **14 个正常分享包**被它挡掉）。默认空 ⇒ 行为**完全跟内容走**。
+
+- **要硬拆**：加 `--全部拆`（无视上面所有判据，见到 zip 就拆）。
 
 ## 已知限制
 

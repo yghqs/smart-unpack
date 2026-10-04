@@ -1,0 +1,9 @@
+# 唯一的第三方依赖。
+#
+# 装：  pip install -r requirements.txt
+# 不装：也能跑 —— 标准库 `zipfile` 能解普通 zip 与 ZipCrypto；
+#       **只有 WinZip AES 加密的包解不了**（那时日志里会明说，不会静默失败）。
+#
+# 其余全是 Python 标准库；`tkinter` 随 CPython 发行版走（个别 Linux 发行版要单独装 python3-tk）。
+# `bin/7z.exe` + `bin/7z.dll` 是随仓库带的，不用另外装 7-Zip（但请读 bin/7z-LICENSE.txt）。
+pyzipper>=0.3.6

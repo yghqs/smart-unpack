@@ -48,7 +48,9 @@
 集中模式    = false
 
 # 「只解压缩包」模式的兜底名单（逗号分隔）。这些后缀**只当交付物、不拆**。
-# 主判据是**内容特征**（包里带 [Content_Types].xml / META-INF/MANIFEST.MF / project.json …）；
-# 这份名单只在内容判不出来时补一刀。**新格式出来自己往后加一条就行。**
-# 要整个无视它（见到 zip 就拆）：命令行加 --全部拆
-不拆后缀    = .docx,.docm,.dotx,.xlsx,.xlsm,.xltx,.pptx,.pptm,.odt,.ods,.odp,.odg,.epub,.jar,.apk,.whl,.egg,.sb3,.vsix,.nupkg,.kra,.ora
+# 主判据是**内容特征**（包里带 [Content_Types].xml / mimetype / META-INF/MANIFEST.MF …
+# **且**有第二条证据才算，见 README「只解压缩包」一节）。
+# 这份名单**默认是空的**，而且**故意空**：名单按后缀判，会把「名字起得像交付物、
+# 内容其实是普通分享包」的整条误杀。默认空 ⇒ 行为完全跟内容走。
+# 想加自己填（逗号分隔）；要整个无视所有判据（见到 zip 就拆）：命令行加 --全部拆
+不拆后缀    =

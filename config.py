@@ -45,8 +45,12 @@ import sys
     # 「只解压缩包」模式的**兜底名单**（逗号分隔）：这些后缀**只当交付物、不拆**。
     # 主判据是**内容特征**（包里带 [Content_Types].xml / META-INF/MANIFEST.MF / project.json …），
     # 名单只在内容判不出来时补一刀。命令行 `--全部拆` 可整个无视它。
-    "不拆后缀": ".docx,.docm,.dotx,.xlsx,.xlsm,.xltx,.pptx,.pptm,.odt,.ods,.odp,.odg,.epub,"
-               ".jar,.apk,.whl,.egg,.sb3,.vsix,.nupkg,.kra,.ora",
+    # ⚠️ **默认空**（2026-10-04 用户裁「后缀名单的默认值改空可以」）——
+    #    名单按后缀判，会把「名字起得像交付物、内容其实是普通分享包」的**误杀**
+    #    （实测一次运行里 14 个正常分享包被整条挡掉）。默认空 ⇒ 行为**完全跟内容判据走**：
+    #    真 docx/jar 照样挡得住（包里带 [Content_Types].xml / META-INF/MANIFEST.MF…），
+    #    名字骗人但内容是普通 zip 的 ⇒ **照拆**。想加自己填，逗号分隔。
+    "不拆后缀": "",
 }
 
 真值 = {"1", "true", "yes", "y", "on", "是", "真"}

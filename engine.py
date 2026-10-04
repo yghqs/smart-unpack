@@ -279,7 +279,55 @@ def 是7z或rar(路径):
     R = 认这类标志(头)
     if R or 头[:2] == b"PK":         # 头是 zip：交给 zipfile 那条路（它会自己找尾部 EOCD）
         return R
-    return 通扫找标志(路径)
+    # ① **先定位「尾」** —— 理由两条：㈠ 图种几乎都是「图片 ＋ 压缩包」，**包的末尾就在文件尾**；
+    #    ㈡ 更要紧：**这一步能把"真图片"一口否掉** —— 尾部就是图片自己的正常收尾
+    #    （PNG 的 IEND／JPEG 的 EOI／GIF 的 3B）⇒ 后面**根本没拼东西** ⇒ 直接判「不是」，
+    #    **一个字节的数据都不用读**。以前是无条件从头扫到底，**大媒体文件被整份读一遍**。
+    尾 = 读尾部(路径)
+    R = 认这类标志(尾)
+    if R:
+        return R
+    if 是图片的正常结尾(头, 尾):
+        return None
+    # ② 头尾都不中 ⇒ 才从头**有界**扫。扫不完就**出声**，别静默当"不是"。
+    #    上限 2026-10-04 用户裁：**64 MB → 500 MB**（64 MB 会把「大图 ＋ 大包」的图种漏掉 ——
+    #    标志落在 64 MB 之外就扫不到，而旧版无上限、扫得到，那是**行为回归**）。
+    #    ⚠️ **只在"头像图片"时才出声** —— 否则一个 600 MB 的大视频也会打一条
+    #       「这个包可能没认出来」，**明明是普通视频、根本不是包** ⇒ 日志被误导性警告刷屏（狼来了）。
+    return 通扫找标志(路径, 上限=500 << 20, 出声=any(头.startswith(t) for t, _ in 图片尾))
+
+
+def 读尾部(路径, 多少=1 << 20):
+    """读文件**最后** _多少_ 字节（不足就全读）。读不了返回 b""。"""
+    try:
+        with open(路径, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            长 = f.tell()
+            f.seek(max(0, 长 - 多少))
+            return f.read()
+    except OSError:
+        return b""
+
+
+# 各种图片的**正常收尾**（文件尾必须是这些 ⇒ 后面没拼东西）
+# ⚠️ **只收"收尾足够长、够独特"的**（2026-10-04 用户裁「那不完善的图种先不着急推」）：
+#    · PNG 的 IEND 是 **12 字节固定串** —— 够独特，留着；
+#    · JPEG 的 EOI 是 **2 字节** `FFD9` —— 短，但拼接物撞上它要同时满足别的条件，先留着（可议）；
+#    · **GIF 的 trailer 只有 1 个字节 `3B`** —— **太弱**：一个「大 GIF ＋ 大 7z/RAR」的图种，
+#      只要那个压缩包的**最后一字节恰好是 0x3B**（约 **1/256**）就会被判成「完整图片」、
+#      **静默漏掉**。**所以 GIF 这条不许用**（宁可对它多扫一遍，也不能静默漏包）。
+图片尾 = ((b"\x89PNG", b"\x00\x00\x00\x00IEND\xaeB`\x82"),   # PNG：IEND 块（12 字节固定）
+         (b"\xff\xd8\xff", b"\xff\xd9"))                      # JPEG：EOI（2 字节，偏短、可议）
+
+
+def 是图片的正常结尾(头, 尾):
+    """头像图片、**尾也正好是那种图片的正常收尾** ⇒ 它是张**完整图片**，后面没拼压缩包。"""
+    if not 尾:
+        return False
+    for 头标, 尾标 in 图片尾:
+        if 头.startswith(头标) and 尾.endswith(尾标):
+            return True
+    return False
 
 
 def 认这类标志(字节):
@@ -292,17 +340,28 @@ def 认这类标志(字节):
     return None
 
 
-def 通扫找标志(路径, 块大小=1 << 20):
+def 通扫找标志(路径, 块大小=1 << 20, 上限=0, 出声=False):
     """从头按块扫，找 7z / RAR 的标志。**找到即停**。返回 "7z" / "RAR" / None。
     ⚠️ 块与块之间要**留 7 个字节的重叠** —— 标志可能正好跨在两块的交界上，
-       不留重叠就会漏（RAR5 的标志是 8 字节，最坏情况整段跨在缝里）。"""
+       不留重叠就会漏（RAR5 的标志是 8 字节，最坏情况整段跨在缝里）。
+    ⚠️ `上限` > 0 时扫到那个字节数就停；`出声=True` 时打一条警告。
+       **默认不出声**：不然任何大文件（大视频、大素材）都会报「可能没认出来」，
+       而它们**根本不是包** ⇒ 日志被误导性警告刷屏（2026-10-04 pro 指出「狼来了」）。"""
+    读过 = 0
     重叠 = b""
     try:
         with open(路径, "rb") as f:
             while True:
+                if 上限 and 读过 >= 上限:
+                    if 出声:
+                        报("          ⚠️ 这个文件看着像图片，但扫到 %s 就停了（上限 %s）"
+                           "—— **后面没看完**，它可能是个大图种、没认出来"
+                           % (人读字节(读过), 人读字节(上限)))
+                    return None
                 块 = f.read(块大小)
                 if not 块:
                     return None
+                读过 += len(块)
                 合 = 重叠 + 块
                 R = 认这类标志(合)
                 if R:
@@ -314,25 +373,53 @@ def 通扫找标志(路径, 块大小=1 << 20):
 
 # 「只解压缩包」模式的两条判据 —— **任一命中就不拆**（默认就是「不拆」）
 # ① 内容特征（主判据，跟「后缀不可信」一致）：包里带这些，就认定它是**交付物**
-不拆标志_全等 = (
-    "[Content_Types].xml",      # OOXML：docx / xlsx / pptx / docm / xlsm…
-    "mimetype",                 # ODF（odt/ods/odp）、epub、Krita(.kra)、ora
-    "META-INF/MANIFEST.MF",     # jar（Java 程序/库）
-    "AndroidManifest.xml",      # apk
-    "project.json",             # sb3（Scratch 作品）
-    "extension.vsixmanifest",   # vsix（VS Code 扩展）
-    "EGG-INFO/PKG-INFO",        # egg（旧的 Python 包）
+# `mimetype` **要读它的内容**才算数 —— 那文件里就是一行 MIME 明文，比"有个同名文件"强得多
+MIME_认识 = ("application/epub+zip", "application/vnd.oasis.opendocument",
+            "application/x-krita", "image/openraster")
+
+# 🔴 **两条证据**才算数：光有一个同名文件**不算** —— `project.json`／`META-INF/MANIFEST.MF`
+#    这类**通用名**在很多**普通分享包**里都会出现，一个就定性 ⇒ **误杀正常分享包**。
+#    每条 = (必须有的标志文件, 第二条证据)。第二条证据写法：
+#      `x/` 结尾 ⇒ 条目名**开头**匹配；`.` 开头 ⇒ 条目名**结尾**匹配；其余 ⇒ 完全相等；None ⇒ 该标志本身就够专有。
+不拆_判据 = (
+    ("[Content_Types].xml",   ("word/", "xl/", "ppt/")),           # OOXML：docx/xlsx/pptx…
+    # jar：光有 MANIFEST.MF 不算（很多普通 zip 也有）；要**第二个**证据。
+    # ⚠️ 第二条**不能只要 `.class`** —— `-sources.jar`／`-javadoc.jar`／纯资源 jar **没有字节码**，
+    #    那样会被判漏 ⇒ **被拆**。所以把「META-INF 下的标准子目录」也算进来。
+    ("META-INF/MANIFEST.MF",  (".class", "META-INF/maven/", "META-INF/services/",
+                               "META-INF/versions/")),
+    ("AndroidManifest.xml",   ("classes.dex", "resources.arsc")),   # apk
+    ("extension.vsixmanifest", ("[Content_Types].xml",)),           # vsix（两个都在才算）
+    ("EGG-INFO/PKG-INFO",     None),                               # egg（够专有）
 )
-不拆标志_后缀 = (
-    ".dist-info/METADATA",      # whl（Python 包：x-1.0.dist-info/METADATA）
-    ".dist-info/WHEEL",
-    ".nuspec",                  # nupkg（NuGet 包）
+# 这几条**要读文件内容**才算数（内容里有该格式特有的串）——比"有个同名文件"强得多。
+# ⚠️ sb3 原来靠「有没有 .svg」，但 Scratch 作品**可以全用 PNG 位图、一个 svg 都没有**
+#    ⇒ 会被判漏、被拆。改成**读 project.json 的内容**（Scratch 的 project.json 必有 targets）。
+不拆_读内容 = (
+    ("mimetype",     MIME_认识),                    # 一行 MIME 明文，前缀匹配
+    ("project.json", ('"targets"',)),               # sb3
 )
+不拆_后缀标志 = (
+    (".dist-info/METADATA",   None),                               # whl
+    (".dist-info/WHEEL",      None),
+    (".nuspec",               None),                               # nupkg
+)
+def _条目合(名们, 第二条):
+    """名们（包里所有条目名）里有没有满足第二条证据的。"""
+    for 条 in (第二条 or ()):
+        for 名 in 名们:
+            if 条.endswith("/") and 名.startswith(条):
+                return True
+            if 条.startswith(".") and 名.endswith(条):
+                return True
+            if 名 == 条:
+                return True
+    return False
 
 
 def 是文档包(路径):
     """这个是**交付物**、不是待拆的压缩包？**两条判据，任一命中就不拆**：
-    ① **内容特征**（主）：包里带某个格式的标志文件 —— 见 `不拆标志_全等` / `不拆标志_后缀`。
+    ① **内容特征**（主）：包里带某个格式的标志文件 —— 见 `不拆_判据` / `不拆_后缀标志` / `不拆_读内容`。
     ② **后缀名单**（兜底，可在配置里手改）：见 `config` 的 `不拆后缀`。
     返回 **"内容"** ／ **"后缀"** ／ None —— **说中是哪一条要写进日志**，别让使用者猜。
 
@@ -352,13 +439,23 @@ def 是文档包(路径):
             名们 = set(z.namelist())
     except Exception:
         return None
-    for 标 in 不拆标志_全等:
-        if 标 in 名们:
+    for 标, 第二条 in 不拆_判据:
+        if 标 in 名们 and (第二条 is None or _条目合(名们, 第二条)):
             return "内容"
-    for 名 in 名们:
-        for 尾 in 不拆标志_后缀:
-            if 名.endswith(尾):
-                return "内容"
+    for 尾, _ in 不拆_后缀标志:
+        if any(名.endswith(尾) for 名 in 名们):
+            return "内容"
+    # 要**读内容**的那几条（`mimetype` 是一行 MIME；`project.json` 要看到 Scratch 的 targets）
+    for 名, 串们 in 不拆_读内容:
+        if 名 not in 名们:
+            continue
+        try:
+            with zipfile.ZipFile(路径, "r") as z:
+                值 = z.read(名).decode("utf-8", "replace")
+        except Exception:
+            continue
+        if any(串 in 值 for 串 in 串们):
+            return "内容"
     return None
 
 
