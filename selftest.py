@@ -206,6 +206,21 @@ def 建素材(FIX, SRC):
         if os.path.isfile(身):
             with open(os.path.join(FIX, "图种7z.png"), "wb") as f:
                 f.write(_小PNG() + io.open(身, "rb").read())
+        # ⑮ **一张普普通通的 PNG（没拼东西）** —— **阴对照**：它**不该**被当成压缩包去拆。
+        #    （pro 审指出：上一版只有"图种必须解开"，没有"真图片必须跳过"，静默漏判那个方向没人盯。）
+        with open(os.path.join(FIX, "素图片.png"), "wb") as f:
+            f.write(_小PNG())
+        # ⑯ **附包 > 1 MB 的大图种** —— 尾部 1 MB 窗口里**看不到**标志，只能靠**有界扫描**兜住。
+        #    （pro 审指出：上一版的图种测试用的是小包，被尾窗命中，**那条新路根本没跑到**。）
+        大源 = os.path.join(源种, "大身子.bin")
+        with open(大源, "wb") as f:
+            f.write(os.urandom(2 * 1024 * 1024))          # 随机 ⇒ 压不动 ⇒ 包体 > 1 MB
+        subprocess.run([找7z(), "a", "-t7z", os.path.join(源种, "大身子.7z"), "大身子.bin"],
+                       cwd=源种, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        大身 = os.path.join(源种, "大身子.7z")
+        if os.path.isfile(大身) and os.path.getsize(大身) > (1 << 20):
+            with open(os.path.join(FIX, "大图种.png"), "wb") as f:
+                f.write(_小PNG() + io.open(大身, "rb").read())
 
     with zipfile.ZipFile(os.path.join(FIX, "越界包.zip"), "w") as z:
         z.writestr("../逃出去.txt", "我不该出现在目标目录外面。")
@@ -823,14 +838,28 @@ def 主():
     夹种 = os.path.join(BASE, "图种-" + 戳)
     os.makedirs(夹种, exist_ok=True)
     if os.path.isfile(os.path.join(FIX, "图种7z.png")):
-        shutil.copy2(os.path.join(FIX, "图种7z.png"), 夹种)
+        # ⚠️ 三件都要拷进来：小图种 / **真图片（阴对照）** / **大图种（走有界扫描那条路）**
+        for 件 in ("图种7z.png", "素图片.png", "大图种.png"):
+            p = os.path.join(FIX, 件)
+            if os.path.isfile(p):
+                shutil.copy2(p, 夹种)
         p36 = 跑(夹种, None, 5.0, os.path.join(输出, "POLY"))
         文36 = p36.stdout + p36.stderr
+        # ⚠️ 别拿「全文里有没有『真身是 PNG』」当判据 —— 同一个夹子里**本来就有**一张
+        #    真图片（阴对照用），它当然会打这句。要看的是**图种那一条自己**的预检行。
         判("图种·**PNG 头 + 7z 身子**也认得出来（只看头 8 字节就会漏）",
-           "7z/RAR" in 文36 and "真身是 PNG" not in 文36,
+           any("7z/RAR" in l for l in 文36.splitlines() if "预检" in l),
            [l for l in 文36.splitlines() if "预检" in l][:2])
         判("图种·里面那个文件真解出来了",
            os.path.isfile(os.path.join(输出, "POLY", 出目录名("图种7z.png.zip"), "图种里的.txt")))
+        # 🔴 **阴对照**：一张**真图片**必须被跳过 —— 别把"图种识别"做成"见图片就拆"
+        判("图种·**真图片（没拼东西）必须跳过**，不许被当压缩包拆",
+           "真身是 PNG" in 文36
+           and not os.path.isdir(os.path.join(输出, "POLY", 出目录名("素图片.png.zip"))))
+        # 🔴 **附包 > 1 MB 的大图种**必须也解得开（走到"有界全扫"那条新路）
+        判("图种·**附包 > 1 MB 的大图种**也解得开（尾窗看不到标志，靠有界扫描兜）",
+           os.path.isfile(os.path.join(输出, "POLY", 出目录名("大图种.png.zip"), "大身子.bin")),
+           [l for l in 文36.splitlines() if "大图种" in l][:2])
     else:
         print("  （图种素材没造出来 ⇒ 跳过）")
 
