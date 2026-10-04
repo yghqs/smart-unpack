@@ -262,18 +262,54 @@ def 找7z():
 
 def 是7z或rar(路径):
     """看**内容**判断，不看后缀 —— 后缀常常不可信（.mp3/.png 里装着压缩包）。
-    返回 "7z" / "RAR"；不归这条路管的一律 None。"""
+    返回 "7z" / "RAR"；不归这条路管的一律 None。
+
+    ⚠️ **不能只看头 8 个字节**（实测踩到）：**图种**（PNG/JPG/TXT 后面**直接接**一个压缩包，
+       网盘分享的常见手法）—— 7z/RAR 的标志**在文件头**，前面垫了张图，标志就**不在头上了**
+       ⇒ 只看头的话**整条漏掉**（实测：`PNG+7z`／`PNG+rar` 全漏，
+       而 **7-Zip 自己扫整个文件、认得出**）。
+       （`PNG+zip` 那种侥幸没事 —— 因为 zip 的标志在**文件尾** EOCD，`zipfile` 是从尾部找的。）
+    ⇒ **头没命中就从头分块扫一遍，找到即停。** 开销＝顺序读到标志为止；
+       真图片才需要读到底。"""
     try:
         with open(路径, "rb") as f:
             头 = f.read(8)
     except OSError:
         return None
-    if 头.startswith(b"7z\xbc\xaf\x27\x1c"):
+    R = 认这类标志(头)
+    if R or 头[:2] == b"PK":         # 头是 zip：交给 zipfile 那条路（它会自己找尾部 EOCD）
+        return R
+    return 通扫找标志(路径)
+
+
+def 认这类标志(字节):
+    """在一段字节里认 7z / RAR 的标志。返回 "7z" / "RAR" / None。"""
+    if b"7z\xbc\xaf\x27\x1c" in 字节:
         return "7z"
     # RAR4 = 52 61 72 21 1A 07 00；RAR5 = 52 61 72 21 1A 07 01 00（第 7 字节不同，分得开）
-    if 头.startswith(b"Rar!\x1a\x07\x01\x00") or 头.startswith(b"Rar!\x1a\x07\x00"):
+    if b"Rar!\x1a\x07\x01\x00" in 字节 or b"Rar!\x1a\x07\x00" in 字节:
         return "RAR"
     return None
+
+
+def 通扫找标志(路径, 块大小=1 << 20):
+    """从头按块扫，找 7z / RAR 的标志。**找到即停**。返回 "7z" / "RAR" / None。
+    ⚠️ 块与块之间要**留 7 个字节的重叠** —— 标志可能正好跨在两块的交界上，
+       不留重叠就会漏（RAR5 的标志是 8 字节，最坏情况整段跨在缝里）。"""
+    重叠 = b""
+    try:
+        with open(路径, "rb") as f:
+            while True:
+                块 = f.read(块大小)
+                if not 块:
+                    return None
+                合 = 重叠 + 块
+                R = 认这类标志(合)
+                if R:
+                    return R
+                重叠 = 合[-7:]
+    except OSError:
+        return None
 
 
 # 「只解压缩包」模式的两条判据 —— **任一命中就不拆**（默认就是「不拆」）
