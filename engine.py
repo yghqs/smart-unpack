@@ -200,10 +200,13 @@ def 不重名(路径):
 
 
 
-def 预检包(路径, 密码们):
+def 预检包(路径, 密码们, 剩余字节=None):
     """**只读**地先看一眼：这个包能不能解、要不要密码、给的密码对不对。
     目的：密码对不上就**当场跳过**，不做任何多余的事。
-    返回 (能不能继续, 说明, 对上的密码 or None)。**不写任何东西。**"""
+    返回 (能不能继续, 说明, 对上的密码 or None)。**不写任何东西。**
+    `剩余字节` 给 7z/RAR 那条路用：它整包落完才轮到我们点数，上限得在**解之前**卡。"""
+    if 是7z或rar(路径):
+        return 预检7z包(路径, 密码们, 剩余字节)
     try:
         with 打开包(路径) as zf:
             条目们 = zf.infolist()
@@ -242,7 +245,230 @@ def 找7z():
 
 
 
-def 用7z解包(包路径, 目标目录, 密码, 状态, 空表):
+# ------------------------------------------------------------
+# 7z / RAR：**按内容认，交给 7z.exe 解**
+# ------------------------------------------------------------
+# ⚠️ 四条实测铁律，改这里之前先读：
+#   ① **永远带 `-p`**。7z.exe 在「没给 -p 又遇加密包」时会往 stdin 弹 `Enter password`
+#      **死等** —— 批处理时会卡在那一步不动。
+#   ② **`-slt` 的键是 7z 自己的英文固定键**（`Type=` / `Size=` / `Encrypted=` / `Path=`），
+#      不随系统语言变，可以直接解析。
+#   ③ **7z 是整包落完才轮到我们点数**，不像 zip 能边解边熔断 ⇒ 上限必须**解之前**先卡。
+#   ④ **凡解析 7z 输出一律带 `-sccUTF-8`**，且判「命中」要**看真读到字节**、不是看退出码 ——
+#      不加 `-sccUTF-8` 时 7z 按本地码页吐文件名，按 UTF-8 解成乱码 ⇒ 拿乱码名当探针
+#      **匹配不上任何条目** ⇒ 7z 返回 **0**（"没有要处理的文件"也算成功）⇒ 候选里第一条必然假命中。
+
+
+def 是7z或rar(路径):
+    """看**内容**判断，不看后缀 —— 后缀常常不可信（.mp3/.png 里装着压缩包）。
+    返回 "7z" / "RAR"；不归这条路管的一律 None。"""
+    try:
+        with open(路径, "rb") as f:
+            头 = f.read(8)
+    except OSError:
+        return None
+    if 头.startswith(b"7z\xbc\xaf\x27\x1c"):
+        return "7z"
+    # RAR4 = 52 61 72 21 1A 07 00；RAR5 = 52 61 72 21 1A 07 01 00（第 7 字节不同，分得开）
+    if 头.startswith(b"Rar!\x1a\x07\x01\x00") or 头.startswith(b"Rar!\x1a\x07\x00"):
+        return "RAR"
+    return None
+
+
+def 读7z列表(文):
+    """把 `7z l -slt` 的文本拆成 [{键: 值}, …]。**第 0 块是压缩包自己**，其后才是条目。"""
+    块们 = []
+    当前 = None
+    for 行 in 文.splitlines():
+        行 = 行.rstrip()
+        if not 行 or 行.startswith("-"):
+            continue          # 空行与 `----------` 分隔线跳过
+        if 行.startswith("Path = "):
+            当前 = {"Path": 行[7:]}
+            块们.append(当前)
+            continue
+        if 当前 is None:
+            continue
+        if " = " in 行:
+            k, v = 行.split(" = ", 1)
+            当前[k.strip()] = v.strip()
+    return 块们
+
+
+def 七z列一遍(路径, 密码=""):
+    """**只读**地列一遍 7z/RAR。返回 (能不能列, 说明, 条目数, 解压后总字节, 有没有加密, 探针条目名, 失败因)。
+    `解压后总字节` 是**所有条目 Size 之和** —— 上限熔断要在解之前拿它卡（铁律③）。
+    `失败因` ∈ None / "加密头" / "打不开" / "没工具" / "超时" —— 加密头要**换密码再列一次**
+    （列得出来就是对的），打不开则换多少密码都没用（残包/假头），别白试。"""
+    七 = 找7z()
+    if not 七:
+        return False, "没找到 7z.exe（7z/RAR 要它才能解）", 0, 0, False, None, "没工具"
+    try:
+        r = subprocess.run([七, "l", "-slt", "-sccUTF-8", "-p" + (密码 or ""), 路径],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           stdin=subprocess.DEVNULL, timeout=600)
+    except subprocess.TimeoutExpired:
+        # 别把「列得慢」说成「没装 7z」—— 那句话会把排查引到完全错的方向
+        return False, "7z 列目录超时（600 秒没列完）—— 包可能极大，或落在卡住的网络盘上", 0, 0, False, None, "超时"
+    except Exception as e:
+        return False, "7z 起不来：%s: %s" % (type(e).__name__, e), 0, 0, False, None, "没工具"
+    文 = r.stdout.decode("utf-8", "replace")
+    块们 = 读7z列表(文)
+    # ⚠️ **空包是合法的**：0 条目的 7z/RAR 只会产生 1 个块（包自身）。
+    #    拿 `len(块们) < 2` 判「列不出来」的话，空包会被错判成失败。
+    if r.returncode != 0 or not 块们:
+        # ⚠️ **两种失败退出码都是 2**（实测），只能靠 7z 自己那两句话分：
+        #    · `Cannot open encrypted archive. Wrong password?` ⇒ 连文件名都加密了（-mhe），**换密码能开**
+        #    · `Cannot open the file as [7z] archive`          ⇒ 残包／假头，**换多少密码都没用**
+        if "Cannot open encrypted archive" in 文:
+            return (False, "是 7z/RAR，但**连文件名都加密了**（-mhe=on），得先给对密码",
+                    0, 0, True, None, "加密头")
+        if "Cannot open the file as" in 文:
+            return (False, "7z 也打不开它 —— 看着像 7z/RAR，其实是**残包或假头**"
+                           "（7z 原话：Cannot open the file as [7z] archive）",
+                    0, 0, True, None, "打不开")
+        return (False, "7z 列不出内容（退出码 %d）—— 既不像加密头、也不像格式错，原话：%s"
+                % (r.returncode, " / ".join(文.splitlines()[-3:])[:200]), 0, 0, True, None, "打不开")
+    条目们 = [b for b in 块们[1:] if not b.get("Attributes", "").startswith("D")]
+    条目们 = 条目们 or 块们[1:]
+    总 = 0
+    最小 = None
+    最小长 = None
+    for b in 条目们:
+        try:
+            长 = int(b.get("Size", 0) or 0)
+        except ValueError:
+            长 = 0
+        总 += 长
+        if 长 > 0 and (最小长 is None or 长 < 最小长):
+            最小长 = 长
+            最小 = b.get("Path")
+    加密 = any(b.get("Encrypted") == "+" for b in 条目们)
+    return True, "7z/RAR·%d 条" % len(条目们), len(条目们), 总, 加密, 最小, None
+
+
+def 试7z密码(路径, 密码, 探针条目=None):
+    """试一条密码；**真流出一个字节**才算对。只抽最小那一条，比 `7z t` 整包验一遍便宜得多。
+    **永远带 `-p`**（铁律①）＋ **`-sccUTF-8`**（铁律④，否则条目名对不上）。
+    🔴 **判据是「读到了字节」，不是「退出码 0」**：7z 在「条目名一个都没匹配上」时**返回 0**
+       （＝"没有要处理的文件"也算成功）⇒ 只看退出码的话，改名/编码一错就**必然假命中**。"""
+    七 = 找7z()
+    if not 七:
+        return False
+    参 = [七, "x", "-so", "-sccUTF-8", "-p" + (密码 or ""), 路径]
+    if 探针条目:
+        参.append(探针条目)          # 不给条目名 = 整包流出来，白解一遍
+    try:
+        p = subprocess.Popen(参, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             stdin=subprocess.DEVNULL)
+    except Exception:
+        return False
+    try:
+        头 = p.stdout.read(1)        # 只读 1 个字节就够判「到底有没有东西出来」（也就不会把大条目读进内存）
+    except Exception:
+        头 = b""
+    try:
+        p.stdout.close()
+    except Exception:
+        pass
+    try:
+        p.terminate()
+    except Exception:
+        pass
+    try:
+        p.wait(timeout=15)
+    except Exception:
+        try:
+            p.kill()
+        except Exception:
+            pass
+    return bool(头)
+
+
+def 预检7z包(路径, 密码们, 剩余字节=None):
+    """**只读**预检 7z/RAR。返回 (能不能继续, 说明, 对上的密码 or None)。
+    ⚠️ 总大小**在这里先卡**：7z 整包落完才轮到我们点数，不先卡的话巨型包／压缩炸弹会把盘写满（铁律③）。"""
+    候选 = [("第 %d 个密码" % 序, pwd) for 序, pwd in enumerate(密码们, 1)]
+
+    能, 说明, 条目数, 总字节, 加密, 探针, 失败因 = 七z列一遍(路径)
+    标签_命中 = None
+    密码_命中 = None
+    if not 能:
+        if 失败因 != "加密头":
+            return False, 说明, None        # 残包/假头/没工具/超时 —— 换多少密码都没用，别白试
+        # **连文件名都加密了**（-mhe）：换个密码**再列一次**，能列出来 ⇒ 这条就是对的
+        for 标签, pwd in 候选:
+            能, 说明, 条目数, 总字节, 加密, 探针, _ = 七z列一遍(路径, pwd)
+            if 能:
+                标签_命中, 密码_命中 = 标签, pwd
+                说明 += "·连文件名也加密"
+                break
+        if not 能:
+            if not 候选:
+                return False, "是 7z/RAR 且**连文件名都加密了**，但没给密码 ⇒ 试不了", None
+            return False, "连文件名都加密了，%d 个密码全列不开" % len(候选), None
+    底 = "7z/RAR %d 条，解压后 %s" % (条目数, 人读字节(总字节))
+    if 剩余字节 is not None and 总字节 > 剩余字节:
+        return (False, "解压后 %s，超过还剩下的额度 %s —— **不解**（7z 没法边解边停，硬解会把盘写满）"
+                % (人读字节(总字节), 人读字节(剩余字节)), None)
+    if 密码_命中 is not None:          # -mhe：列得出来本身就已经证明密码对了，不必再探
+        return True, "%s·需密码，命中%s" % (底, 标签_命中), 密码_命中
+    if not 加密:
+        return True, 底 + "·无需密码", None
+    if not 候选:
+        return False, 底 + "·需要密码，但没提供密码", None
+    for 标签, pwd in 候选:
+        if 试7z密码(路径, pwd, 探针):
+            return True, "%s·需密码，命中%s" % (底, 标签), pwd
+    return False, "%s·需要密码，给的 %d 个都不对" % (底, len(候选)), None
+
+
+def 解7z包(包路径, 目标目录, 密码们, 状态, 预设密码=None, 预设说明=None):
+    """把 7z/RAR 交给 7z.exe 解。返回 (状态文本, 本条解出字节数)。
+    摊平规则与 zip 那条路**完全一致**：只取文件名、不保留包内目录。
+    ⚠️ 上限**必须先卡**（走 预检7z包）—— 7z 是整包落完才轮到我们点数，边解边熔断做不到。"""
+    对 = 预设密码
+    说明 = 预设说明 or ""
+    # `条目数` 是**每个包各算各的**：不归零的话会沿用上一个 zip 包的数，日志里「平均每条」那行就错了
+    状态["条目数"] = 0
+    if 对 is None:
+        能, 说明, 对 = 预检7z包(包路径, 密码们, 状态["上限字节"] - 状态["已解字节"])
+        if not 能:
+            return 说明, 0
+    空表 = [0]
+    try:
+        r7 = 用7z解包(包路径, 目标目录, 对 or "", 状态, 空表, 引擎说明="7z/RAR ⇒ 走 7z 引擎")
+    except 超限:
+        # 触顶也得留标记（这条路不留的话，下次会被当成「已解过」跳过，永远解不完）
+        留未完成标记(目标目录, ["累计解出触顶：本包走 7z 引擎，整包先落临时目录，写到一半就停了"], 状态)
+        raise
+    if r7 is None:
+        return "找不到 7z.exe ⇒ 这个 7z/RAR 解不了", 0
+    _好, 述, 字节 = r7
+    if 空表[0]:
+        述 += "；0 字节条目 %d 个（不写出）" % 空表[0]
+    return 述, 字节
+
+
+def 留未完成标记(目录, 原因们, 状态=None):
+    """写 `_未完成.txt` ⇒ 下次跑**不许**当「已解过」跳过。返回写成功没有。
+    ⚠️ 半成品**必须**留标记 —— 不留的话下次会被当成解完了，这个包就**永远解不完**。
+    ⚠️ 哪条路触顶都要留：只有 zip 逐条目那条路留过，**走 7z 引擎那条漏了**。"""
+    if 状态 is not None:
+        状态["本包未完成"] = True
+    try:
+        with io.open(os.path.join(目录, "_未完成.txt"), "w", encoding="utf-8") as m:
+            m.write("⚠️ 这个包**没解完**，下面写原因。\n")
+            m.write("下次跑会自动把它挪走重做，不用你管。\n\n")
+            for s in list(原因们)[:30]:
+                m.write("  · %s\n" % s)
+    except OSError as e:
+        报("          ⚠️ 半成品标记没写成（%s）—— 下次可能被当成已解完，务必手工看一下" % e)
+        return False
+    return True
+
+
+def 用7z解包(包路径, 目标目录, 密码, 状态, 空表, 引擎说明="ZipCrypto ⇒ 走 7z 引擎"):
     """**ZipCrypto 的包交给 7z 解** —— pyzipper 的 ZipCrypto 是**纯 Python 逐字节**实现，
     实测 **1.74 MB/s**（同一个 200MB 包：pyzipper 114.9 秒 / 7z 1.6 秒，**71 倍**）。
     做法：先解到 `_tmp\\` 下的临时目录，再**摊平**搬进调用方给的目标目录（同盘改名，快），临时目录最后收走。
@@ -254,12 +480,21 @@ def 用7z解包(包路径, 目标目录, 密码, 状态, 空表):
                               "7z-" + os.path.basename(包路径)))
     try:
         os.makedirs(临时, exist_ok=True)
+    except OSError as e:
+        return False, "建不了临时目录：%s: %s" % (type(e).__name__, e), 0
+    # ⚠️ **先登记、再跑 7z**：以前是跑完才 append ⇒ 若 `subprocess.run` 抛异常（超时／起不来）
+    #    就直接 return，这个临时目录**既没登记、也没人收** ⇒ 盘上留一个可能几 GB 的孤儿，
+    #    而且「用完即清」的设计下**静默不清理**（2026-10-04 二审指出）。
+    中间层清单.append(临时)                    # 临时目录也算过程产物，收尾一并收走
+    try:
         r = subprocess.run([七, "x", "-y", "-bso0", "-bsp0", "-p" + 密码,
                             "-o" + 临时, 包路径],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3600)
+    except subprocess.TimeoutExpired:
+        # 别把「解得太久」说成「7z 起不来」—— 那句话会把排查引到完全错的方向
+        return False, "7z 解超时（3600 秒没解完，包可能极大）—— 临时目录已登记，收尾会一并收走", 0
     except Exception as e:
         return False, "7z 起不来：%s: %s" % (type(e).__name__, e), 0
-    中间层清单.append(临时)                    # 临时目录也算过程产物，收尾一并收走
     if r.returncode != 0:
         return False, "7z 解不开（退出码 %d：多半是密码不对）" % r.returncode, 0
     本包 = 0
@@ -284,7 +519,7 @@ def 用7z解包(包路径, 目标目录, 密码, 状态, 空表):
             本包 += s
             状态["已解字节"] += s
             写 += 1
-    return True, "（ZipCrypto ⇒ 走 7z 引擎）写出 %d 个，%s" % (写, 人读字节(本包)), 本包
+    return True, "（%s）写出 %d 个，%s" % (引擎说明, 写, 人读字节(本包)), 本包
 
 
 
@@ -334,6 +569,9 @@ def 解一个包(包路径, 目标目录, 密码们, 状态, 预设密码=None, 
     """逐条目解压；返回 (状态文本, 本条解出字节数)。
     状态复用里的 已解字节 由调用方累加 —— 触顶会抛 超限。"""
     os.makedirs(目标目录, exist_ok=True)
+    # 7z / RAR：整条交给 7z.exe（按**内容**判定，不看后缀）
+    if 是7z或rar(包路径):
+        return 解7z包(包路径, 目标目录, 密码们, 状态, 预设密码, 预设说明)
     本包字节 = 0
     try:
         with 打开包(包路径) as zf:
@@ -366,15 +604,38 @@ def 解一个包(包路径, 目标目录, 密码们, 状态, 预设密码=None, 
                 #    实测 1.74 MB/s（同一个 200MB 包 pyzipper 114.9 秒 vs 7z 1.6 秒，71 倍）。
                 #    判据：加密条目里**没有 compress_type==99**（99 = WinZip AES）⇒ 就是 ZipCrypto。
                 if not any(i.compress_type == 99 for i in 条目们 if 需要密码(i)):
-                    zf.close()
-                    空表 = [0]          # 用 list 承接「0 字节条目几个」这个出参
-                    r7 = 用7z解包(包路径, 目标目录, 对, 状态, 空表)
-                    if r7 is not None:
-                        _好, 述7, 字节7 = r7
-                        if 空表[0]:
-                            述7 += "；0 字节条目 %d 个（不写出）" % 空表[0]
-                        return 述7, 字节7
-                    报("          ⚠️ 没找到 7z.exe ⇒ 只能用纯 Python 解 ZipCrypto（会慢几十倍）")
+                    # 🔴 **先确认真有 7z，再关 zf**：以前是「先 zf.close()、再看 用7z解包 返回 None」——
+                    #    可那时 zf 已经关了，下面 `zf.setpassword` / `zf.open` 作用在**已关闭**的对象上
+                    #    ⇒ 抛异常被兜住 ⇒ 没装 7z 的机器上凡 ZipCrypto 包**一律报错**，
+                    #    而注释与 README 承诺的「慢但能解」回退**根本不存在**。
+                    if 找7z():
+                        # ⚠️ **上限必须现在卡**：7z 是**整包先落进临时目录**、之后才轮到我们逐文件点数，
+                        #    不像纯 Python 那条路能边解边熔断。不先卡 ⇒ 巨型包／压缩炸弹先把盘写满。
+                        总需 = sum(int(getattr(i, "file_size", 0) or 0) for i in 条目们)
+                        剩 = 状态["上限字节"] - 状态["已解字节"]
+                        if 总需 > 剩:
+                            return ("包内合计 %s，超过还剩下的额度 %s —— **不解**（ZipCrypto 得交给 7z，"
+                                    "而 7z 没法边解边停，硬解会把盘写满）"
+                                    % (人读字节(总需), 人读字节(剩))), 0
+                        zf.close()
+                        空表 = [0]      # 用 list 承接「0 字节条目几个」这个出参
+                        try:
+                            r7 = 用7z解包(包路径, 目标目录, 对, 状态, 空表)
+                        except 超限:
+                            # 触顶也得留标记（这条路以前不留 —— 下次会被当成「已解过」跳过，永远解不完）
+                            留未完成标记(目标目录, ["累计解出触顶：本包走 7z 引擎，整包先落临时目录，"
+                                                    "写到一半就停了"], 状态)
+                            raise
+                        if r7 is not None:
+                            _好, 述7, 字节7 = r7
+                            if 空表[0]:
+                                述7 += "；0 字节条目 %d 个（不写出）" % 空表[0]
+                            return 述7, 字节7
+                        # r7 是 None ⇒ `用7z解包` 里那次 找7z() 没找到（与上面这次结果不一致）。
+                        # ⚠️ 此时 `zf` **已经关了** ⇒ 绝不能落到下面拿它 setpassword/open。
+                        return "7z 引擎这次没找到（前后两次结果不一致？）⇒ 这个包没解", 0
+                    else:
+                        报("          ⚠️ 没找到 7z.exe ⇒ 只能用纯 Python 解 ZipCrypto（会慢几十倍）")
                 zf.setpassword(对.encode("utf-8", "surrogateescape") if isinstance(对, str) else 对)
 
             写了 = 0
@@ -457,8 +718,7 @@ def 解一个包(包路径, 目标目录, 密码们, 状态, 预设密码=None, 
                            % (费, 名字, 人读字节(本包字节 - 本条目头),
                               (本包字节 - 本条目头) / 1048576.0 / 费 if 费 else 0))
                 except 超限:
-                    with open(os.path.join(目标目录, "_未完成.txt"), "w", encoding="utf-8") as m:
-                        m.write("累计解出触顶，本包解到「%s」为止，后面没解。\n" % 名字)
+                    留未完成标记(目标目录, ["累计解出触顶，本包解到「%s」为止，后面没解。" % 名字], 状态)
                     raise
                 except Exception as e:
                     跳过.append("%s（%s）" % (名字, e))
@@ -467,16 +727,7 @@ def 解一个包(包路径, 目标目录, 密码们, 状态, 预设密码=None, 
             # ⚠️ 半成品要**留标记** —— 不然下次「已解过就跳过」会把它当成解完了，这个包就**永远解不完**。
             #    （容易漏：只在容量触顶时写标记不够 —— 超时/出错也必须写，否则这个包永远解不完）
             if 未完成原因:
-                状态["本包未完成"] = True      # 台账那边靠这个决定「记不记完成」
-                try:
-                    with io.open(os.path.join(目标目录, "_未完成.txt"), "w", encoding="utf-8") as m:
-                        m.write("⚠️ 这个包**没解完**，下面写原因。\n")
-                        m.write("下次跑会自动把它挪走重做，不用你管；要现在就重做加 --全部重来。\n\n")
-                        for s in 未完成原因[:30]:
-                            m.write("  · %s\n" % s)
-                except OSError as e:
-                    报("          ⚠️ 半成品标记没写成（%s）" % e)
-                else:
+                if 留未完成标记(目标目录, 未完成原因, 状态):
                     报("          ⚠️ 本包是**半成品**（%d 条没解成）—— 已留 _未完成.txt，下次会自动重做"
                        % len(未完成原因))
 
@@ -576,7 +827,8 @@ def 再解一层(目录, 剩余, 密码们, 状态, 行们, 标签):
     for p in 待办:
         if not os.path.isfile(p):
             continue
-        if not zipfile.is_zipfile(p):
+        内层形 = 是7z或rar(p)          # 7z/RAR 与 zip 一样算「真身是压缩包」
+        if not 内层形 and not zipfile.is_zipfile(p):
             # ⚠️ 认不出来**也要在日志里交代它到底是什么** —— 不能默默 continue，
             #    否则「内层没解开」在日志里查不到任何原因（问题该在日志里，不该回头问使用者）
             什么 = 认头部(p)
@@ -592,7 +844,7 @@ def 再解一层(目录, 剩余, 密码们, 状态, 行们, 标签):
         解了 += 1
         再解一层(目录, 剩余 - 1, 密码们, 状态, 行们, 标签 + " / " + 名)
     # 本层结论写清楚：看了几个、解了几个、剩下那些为什么没解
-    报("        · 本层看过 %d 个文件，其中 %d 个真身是 zip（已解）" % (len(待办), 解了))
+    报("        · 本层看过 %d 个文件，其中 %d 个真身是压缩包（zip/7z/RAR，已解）" % (len(待办), 解了))
     if 别的压缩包:
         报("        · ⚠️ 另有 %d 个**是压缩包但不是 zip**，本工具认不出、开不了 —— 认得的都列在这："
            % len(别的压缩包))

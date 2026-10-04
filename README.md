@@ -29,8 +29,8 @@ config.py        可调配置（默认值 + 读配置文件）
 gui.py           界面（唯一 import tkinter 的地方）
 smart_unpack.py  命令行入口 + main
 查未定义.py       静态查「引用了但没定义」的名字（拆分后必跑）
-selftest.py      阳/阴对照自测（84 项）
-bin/7z.exe + 7z.dll   解 ZipCrypto 用（见下；两个文件缺一不可）
+selftest.py      阳/阴对照自测
+bin/7z.exe + 7z.dll   解 ZipCrypto / 7z / RAR 用（见下；两个文件缺一不可）
 smart-unpack.ini.example  配置文件样例
 ```
 
@@ -72,11 +72,18 @@ python smart_unpack.py --诊断                            # 环境自检（编�
 |---|---|---|
 | WinZip **AES** | `pyzipper` | 走 C 实现，约 270 MB/s |
 | **ZipCrypto**（7-Zip 做 zip 的默认加密） | **`7z.exe`** | pyzipper 的 ZipCrypto 是**纯 Python 逐字节**实现，实测只有 **1.7 MB/s**（同一个 200MB 包：pyzipper 114.9 秒 / 7z 1.6 秒，**71 倍**） |
+| **7z / RAR**（含 `-mhe` 连文件名加密的 7z） | **`7z.exe`** | Python 生态里没有能解 RAR 的纯 Python 库；7z 两个都解得了 |
+
+**7z / RAR 是按内容认的**（读文件头，不看后缀），所以「后缀乱写成 `.mp3` 的 7z」照样解得开。
+⚠️ 7z 有个坑：它**在「条目名一个都没匹配上」时也返回退出码 0**（＝"没有要处理的文件"算成功），
+所以本工具判「密码对不对」**不看出口码、看有没有真读到字节**。另外解析 7z 的输出一律带 `-sccUTF-8`
+（不加时它按本地码页吐文件名，非英文名会变乱码）。
 
 `bin/` 下随仓库带了 7-Zip 的 **`7z.exe` + `7z.dll`**（约 577KB + 1.9MB）。**两个缺一不可** ——
 `7z.exe` 会去旁边（或按注册表）找 `7z.dll`，只带 exe 在没装 7-Zip 的机器上会失效。
 7-Zip 的许可原文随包在 `bin/7z-LICENSE.txt`。**不想带这两个文件**的话，把 `bin/` 删掉即可：
 工具检测不到 7z 会自动退回 pyzipper 解 ZipCrypto（能解，但慢几十倍，日志里会明说）。
+⚠️ 但**删掉 `bin/` 就等于放弃 7z / RAR** —— 那两个格式全靠它，没有纯 Python 的退路（日志里会明说「找不到 7z.exe」）。
 
 ## 输出长什么样
 
@@ -97,7 +104,11 @@ _解压输出\
 
 ## 已知限制
 
-- **只解 ZIP 家族**（zip / zip+AES / zip+ZipCrypto）。7z / RAR 能被**认出来**（日志会写明），但不开。
+- **解得了 ZIP 家族（zip / zip+AES / zip+ZipCrypto）＋ 7z ＋ RAR**（含 `-mhe` 连文件名加密的 7z）。
+  仍**不收** gzip / bzip2 / xz / tar 这类**单文件**格式 —— 它们解出来是文件不是目录，跟本工具「一个源包一个目录」的形态不兼容；这类能被认出来（日志会写明），但不开。
+- **RAR 的自动化测试是空着的**：7-Zip 能解 RAR 但**造不出** RAR（`7z a -trar` 报「未实现」），
+  而仓库里**故意不放**别人的二进制样本，所以 `selftest.py` 里那条 RAR 断言只在你自己丢了
+  `testdata/真RAR样本.rar` 之后才会跑。7z 那边是全覆盖的。
 - 判断「卡死」发生在**每块数据读回来之后**：若某次读本身卡住不返回，只能等它返回。
 - 集中模式下「台账记着解完、目录却被删」的自愈不生效（那靠目录判断，集中模式没有包目录）。
 - 解压是单线程，一个包接一个包。
@@ -105,7 +116,7 @@ _解压输出\
 ## 测试
 
 ```bash
-python selftest.py        # 84 项阳/阴对照：加密/ZipCrypto/AES/嵌套/zip slip/熔断/超时/0字节/同名包/集中模式…
+python selftest.py        # 阳/阴对照（跑完自己报项数）：加密/ZipCrypto/AES/7z/RAR/嵌套/zip slip/熔断/超时/0字节/同名包/集中模式…
 python 查未定义.py *.py    # 静态查未定义名字
 ```
 
