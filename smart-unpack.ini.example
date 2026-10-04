@@ -44,3 +44,9 @@
 
 # 放法：false = 每个源包一个目录；true = 全部合并到一个文件夹
 集中模式    = false
+
+# 「只解压缩包」模式的兜底名单（逗号分隔）。这些后缀**只当交付物、不拆**。
+# 主判据是**内容特征**（包里带 [Content_Types].xml / META-INF/MANIFEST.MF / project.json …）；
+# 这份名单只在内容判不出来时补一刀。**新格式出来自己往后加一条就行。**
+# 要整个无视它（见到 zip 就拆）：命令行加 --全部拆
+不拆后缀    = .docx,.docm,.dotx,.xlsx,.xlsm,.xltx,.pptx,.pptm,.odt,.ods,.odp,.odg,.epub,.jar,.apk,.whl,.egg,.sb3,.vsix,.nupkg,.kra,.ora

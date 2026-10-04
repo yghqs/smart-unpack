@@ -35,6 +35,7 @@ import config
 整包明细秒 = 配置["整包明细秒"]
 停滞秒 = 配置["停滞秒"]
 集中模式 = 配置["集中模式"]
+不拆后缀 = config.仅处理后缀列表(配置["不拆后缀"])     # 同一个「逗号分隔 → 列表」帮手，别再写一个
 
 try:
     import pyzipper
@@ -275,22 +276,65 @@ def 是7z或rar(路径):
     return None
 
 
-文档标志 = ("[Content_Types].xml", "mimetype")
+# 「只解压缩包」模式的两条判据 —— **任一命中就不拆**（默认就是「不拆」）
+# ① 内容特征（主判据，跟「后缀不可信」一致）：包里带这些，就认定它是**交付物**
+不拆标志_全等 = (
+    "[Content_Types].xml",      # OOXML：docx / xlsx / pptx / docm / xlsm…
+    "mimetype",                 # ODF（odt/ods/odp）、epub、Krita(.kra)、ora
+    "META-INF/MANIFEST.MF",     # jar（Java 程序/库）
+    "AndroidManifest.xml",      # apk
+    "project.json",             # sb3（Scratch 作品）
+    "extension.vsixmanifest",   # vsix（VS Code 扩展）
+    "EGG-INFO/PKG-INFO",        # egg（旧的 Python 包）
+)
+不拆标志_后缀 = (
+    ".dist-info/METADATA",      # whl（Python 包：x-1.0.dist-info/METADATA）
+    ".dist-info/WHEEL",
+    ".nuspec",                  # nupkg（NuGet 包）
+)
 
 
 def 是文档包(路径):
-    """这个是**文档**、不是待拆的压缩包？判据**只看内容**（后缀本来就不可信）：
-    OOXML（docx / xlsx / pptx…）里一定有 `[Content_Types].xml`；ODF / epub 里一定有 `mimetype`。
-    ⚠️ 为什么要有这条：`.docx`／`.xlsx` **本身就是 zip**，不挡住的话「自动续解」会把它们
-       **拆成一堆 XML 碎片、文档本体没了**。
-    ⚠️ 判据用**内容**、不用扩展名 —— 本工具的前提就是「后缀不可信」，
-       按后缀豁免等于自相矛盾；而「被改名成 .docx 的分享包」不带这两个标志，**照样会被拆**。"""
+    """这个是**交付物**、不是待拆的压缩包？**两条判据，任一命中就不拆**：
+    ① **内容特征**（主）：包里带某个格式的标志文件 —— 见 `不拆标志_全等` / `不拆标志_后缀`。
+    ② **后缀名单**（兜底，可在配置里手改）：见 `config` 的 `不拆后缀`。
+    返回 **"内容"** ／ **"后缀"** ／ None —— **说中是哪一条要写进日志**，别让使用者猜。
+
+    ⚠️ 为什么要有这条：`.docx`／`.xlsx`／`.jar`／`.apk` 这类**本身就是 zip**，不挡住的话
+       「自动续解」会把它们**拆成零件、本体没了**。
+    ⚠️ **魔数分不出它们**：实测 docx / jar / apk / whl / sb3 / 普通 zip 的**头 4 字节全是 `504b0304`**，
+       一模一样 —— 所以「只解真压缩包」**不可能只看头几个字节**，必须再看包里装的是什么。
+    ⚠️ 两条判据**故意并存、各自有漏**，所以取「或」：内容判据漏 `.jar`／`.apk`／`.whl`／`.sb3`／`.vsix`
+       （实测 8 种漏 5 种）；后缀判据漏「被改名的分享包」。**两条都不中才拆** ——
+       拿不准就不拆（2026-10-04 用户裁：「**默认不拆**，你不拆的用户大概不会怪你的」）。"""
+    if 不拆后缀:
+        尾 = os.path.splitext(路径)[1].lower()
+        if 尾 and 尾 in [s.lower() for s in 不拆后缀]:
+            return "后缀"
     try:
         with zipfile.ZipFile(路径, "r") as z:
             名们 = set(z.namelist())
     except Exception:
-        return False
-    return any(标 in 名们 for 标 in 文档标志)
+        return None
+    for 标 in 不拆标志_全等:
+        if 标 in 名们:
+            return "内容"
+    for 名 in 名们:
+        for 尾 in 不拆标志_后缀:
+            if 名.endswith(尾):
+                return "内容"
+    return None
+
+
+强制全拆 = False        # 入口按 `--全部拆` 设；设了就不认上面那两条判据
+
+
+def 该不拆(路径):
+    """要不要**故意不拆**。返回 **"内容"** / **"后缀"** / None（谁说中的，日志里要写出来）。
+    唯一的出口 —— 两个调用点（入口主循环、再解一层）都走它，免得两边判据跑偏。"""
+    if 强制全拆:
+        return None
+    return 是文档包(路径)
 
 
 def 读7z列表(文):
@@ -865,9 +909,10 @@ def 再解一层(目录, 剩余, 密码们, 状态, 行们, 标签):
             if any(k in 什么 for k in 带压缩包味的):
                 别的压缩包.append("%s  =  %s" % (os.path.relpath(p, 目录), 什么))
             continue
-        if 是文档包(p):
-            # 文档（docx/xlsx/odt/epub…）**不往里解** —— 它本身就是 zip，拆开只会得到一堆 XML 碎片
-            文档包们.append("%s  =  %s" % (os.path.relpath(p, 目录), 认头部(p)))
+        因 = 该不拆(p)
+        if 因:
+            # 交付物（docx/xlsx/jar/apk…）**不往里解** —— 它本身就是 zip，拆开只会得到一堆零件
+            文档包们.append("%s  =  %s（判据：%s）" % (os.path.relpath(p, 目录), 认头部(p), 因))
             continue
         名 = os.path.basename(p)
         # 只嵌一层：内层的内容**摊进同一个包目录**（不再套子目录）
@@ -881,8 +926,8 @@ def 再解一层(目录, 剩余, 密码们, 状态, 行们, 标签):
     报("        · 本层看过 %d 个文件，其中 %d 个真身是压缩包（zip/7z/RAR，已解）" % (len(待办), 解了))
     if 文档包们:
         # 出声，别默默跳过 —— 使用者得知道「这个没拆是**故意的**」
-        报("        · 另有 %d 个是**文档**（里面带 [Content_Types].xml / mimetype），**故意不拆**"
-           "（拆了只会得到一堆 XML 碎片）：" % len(文档包们))
+        报("        · 另有 %d 个是**交付物**（docx/xlsx/jar/apk… 本身就是 zip），**故意不拆**"
+           "（拆了只会得到一堆零件）：" % len(文档包们))
         for s in 文档包们[:10]:
             报("            %s" % s)
         if len(文档包们) > 10:

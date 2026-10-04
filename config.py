@@ -42,6 +42,11 @@ import sys
     "条目记账秒": 2.0,       # 单条目超过多少秒单独记一行
     "整包明细秒": 10.0,      # 整包合计超过多少秒才多打一行
     "集中模式": False,       # False = 每包一目录；True = 全并到一个文件夹
+    # 「只解压缩包」模式的**兜底名单**（逗号分隔）：这些后缀**只当交付物、不拆**。
+    # 主判据是**内容特征**（包里带 [Content_Types].xml / META-INF/MANIFEST.MF / project.json …），
+    # 名单只在内容判不出来时补一刀。命令行 `--全部拆` 可整个无视它。
+    "不拆后缀": ".docx,.docm,.dotx,.xlsx,.xlsm,.xltx,.pptx,.pptm,.odt,.ods,.odp,.odg,.epub,"
+               ".jar,.apk,.whl,.egg,.sb3,.vsix,.nupkg,.kra,.ora",
 }
 
 真值 = {"1", "true", "yes", "y", "on", "是", "真"}
