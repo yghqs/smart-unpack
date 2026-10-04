@@ -81,7 +81,10 @@ def main():
         description="选文件夹 → 按内容认压缩包 → 直接解压（原文件不动；加密的当场给密码）")
     ap.add_argument("-d", "--目录", help="要处理的文件夹；不填就弹窗选")
     ap.add_argument("--全部", action="store_true", help="不弹选后缀的框，文件夹里所有文件都处理")
-    ap.add_argument("--上限GB", type=float, default=上限GB, help="累计解出多少 GB 就停（默认 %.1f）" % 上限GB)
+    ap.add_argument("--上限GB", type=float, default=上限GB,
+                    help="**盘上占用**多少 GB 就停（默认 %.1f）—— 量的是「现在盘上还占着多少」，"
+                         "不是「一共写出过多少」：嵌套包的中间层一解开就当场收走、额度还回，"
+                         "**套娃再深也不会按层数翻倍扣**" % 上限GB)
     ap.add_argument("--后缀", default=engine.输出后缀,
                     help="输出目录名按此后缀归一化（默认 %s）" % engine.输出后缀)
     ap.add_argument("--仅后缀", action="append", default=None,
@@ -182,7 +185,7 @@ def main():
     报("=" * 62)
     报("文件夹：%s" % 根)
     报("输出到：%s" % 输出根)
-    报("上限  ：%.2f GB（累计解出，触顶即全场停止）" % args.上限GB)
+    报("上限  ：%.2f GB（**盘上占用** —— 中间层一解开就当场收走、额度还回；触顶即全场停止）" % args.上限GB)
     报("输出后缀：%s    解压层数：%s    含子目录：%s"
        % (engine.输出后缀,
           "自动（还是压缩包就接着解，最多 %d 层）" % 上限层数 if args.层数 <= 0 else str(args.层数),
@@ -432,7 +435,7 @@ def main():
     except 超限:
         中断 = True
         报("")
-        报("🛑 累计解出已达上限 %.2f GB —— 全场停止。" % args.上限GB)
+        报("🛑 **盘上占用**已达上限 %.2f GB —— 全场停止。" % args.上限GB)
         报("   已解出合计：%s" % 人读字节(状态["已解字节"]))
         # ⚠️ 触顶是**从循环里直接抛出来**的 ⇒ 收尾那句「收走中间层」会被跳过，
         #    临时目录（走 7z 引擎时可能好几 GB）就留在盘上了。这儿补收一次。
